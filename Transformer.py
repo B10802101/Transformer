@@ -30,10 +30,10 @@ def Self_attension(X, W_qkv, d_model, W_o):
     Q = F.linear(X, W_q)
     K = F.linear(X, W_k)
     V = F.linear(X, W_v)
-    attention_scores = torch.matmul(Q, K.T) / sqrt(d_model)
-    attention_weights = softmax(attention_scores)
+    attention_scores = torch.matmul(Q, K.T) / (d_model ** 0.5)
+    attention_weights = F.softmax(attention_scores, dim=-1)
     result = torch.matmul(attention_weights, V)
-    result = torch.matmul(result, W_o)
+    result = torch.matmul(result, W_o.T)
     return result
 
 # Positional encoding
