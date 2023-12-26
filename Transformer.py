@@ -32,23 +32,16 @@ class Multihead_attention(nn.Module):
     """
     X(Seq, d_model)
     q, k, v(batch_size, num_heads, seq_length, depth)
-    attention_weights(d_model, d_model)
+    attention_weights(batch_size, num_heads, seq_length, seq_length)
     result(batch_size, num_heads, seq_length, depth)
-    Mask(lookahead, padding) = (True, True) or (False, True)
     """
 
     def Scaled_dot_product_attention(self, x, q, k, v, Mask):
         d_model = k.shape[-1]
         k_t = k.permute(0, 1, 3, 2)
         attention_scores = torch.matmul(q, k_t) / (d_model ** 0.5)
-        if Mask[0] == True and Mask[1] == True:
-            Lookahead_mask = self.lookahead_mask(q.shape[-2], k.shape[-2])
-            Padding_mask = self.padding_mask(x)
-            Combine_mask = torch.maximum(Padding_mask, Lookahead_mask)
-            attention_scores += Combine_mask * -1e9
-        elif Mask[0] == False and Mask[1] == True:
-            Padding_mask = self.padding_mask(x)
-            attention_scores += Padding_mask * -1e9
+        if Mask is not None:
+            attention_scores += Mask * -1e9
         attention_weights = F.softmax(attention_scores, dim=-1)
         result = torch.matmul(attention_weights, v)
         return attention_weights, result
@@ -70,10 +63,14 @@ class Multihead_attention(nn.Module):
         return lookahead_mask
 
     # Creating a padding mask
+    
+    def create_padding_mask(self, seq):
+        padding_mask = torch.eq(seq, 0).float()
+        return padding_mask.unsqueeze(1).unsqueeze(1)
 
-    def padding_mask(self, x):
-        padding_mask = torch.eq(x, 0).float()
-        return padding_mask
+    def create_lookahead_mask(self, size):
+        lookahead_mask = torch.triu(torch.ones(size, size)) - torch.eye(size, size)
+        return lookahead_mask
     
     # Split heads
 
@@ -153,8 +150,8 @@ class Encoderlayer(nn.Module):
     
     # forward
 
-    def forward(self, x):
-        attn_output, attnw = self.mha(x, x, x, x, (False, True))
+    def forward(self, x, mask):
+        attn_output, attnw = self.mha(x, x, x, x, mask)
         attn_output = self.dropout1(attn_output)
         x = self.layernorm1(attn_output + x)
 
@@ -188,12 +185,14 @@ class Decoderlayer(nn.Module):
         self.dropout1 = nn.Dropout(rate)
         self.dropout2 = nn.Dropout(rate)
         self.dropout3 = nn.Dropout(rate)
-    def forward(self, x, mask, enc_out):
-        attn1, attn1_w = self.mha1(x, x, x, x, (True, True))
+    def forward(self, x, combine_mask, padding_mask, enc_out):
+        attn1, attn1_w = self.mha1(x, x, x, x, combine_mask)
         attn1 = self.dropout1(attn1)
         out1 = self.layernorm1(x + attn1)
 
-        attn2, attn2_w = self.mha2(out1, out1, enc_out, enc_out, (False, True))
+        enc_out = enc_out[:, :x.shape[1], :]
+
+        attn2, attn2_w = self.mha2(out1, out1, enc_out, enc_out, padding_mask)
         attn2 = self.dropout2(attn2)
         out2 = self.layernorm2(out1 + attn2)
 
@@ -246,14 +245,14 @@ class Encoder(nn.Module):
                            for _ in range(num_layers)]
 
         self.dropout = nn.Dropout(rate)
-    def forward(self, x):
+    def forward(self, x, mask):
         x = self.embedding(x.to(torch.long))   # (batch_size, seq_length, d_model)
         x *= self.d_model ** 0.5
         x += self.pos_encoding
         x = self.dropout(x)
 
         for i, enc_layer in enumerate(self.enc_layers):
-            x = enc_layer(x)
+            x = enc_layer(x, mask)
         
         return x
 
@@ -275,7 +274,7 @@ class Decoder(nn.Module):
         self.dec_layers = [Decoderlayer(d_model, num_heads, dff, rate)
                            for _ in range(num_layers)]
         self.dropout = nn.Dropout(rate)
-    def forward(self, tar, mask, enc_out):
+    def forward(self, tar, combine_mask, padding_mask, enc_out):
         attention_weights = {}
 
         tar = self.embedding(tar.to(torch.long))    # (batch_size, seq_length, d_model)
@@ -284,7 +283,7 @@ class Decoder(nn.Module):
         tar = self.dropout(tar)
 
         for i, dec_layer in enumerate(self.dec_layers):
-            tar, attn1_w, attn2_w = dec_layer(tar, mask, enc_out)
+            tar, attn1_w, attn2_w = dec_layer(tar, combine_mask, padding_mask, enc_out)
 
             attention_weights[f'decoderlayer{i+1} attention weights 1'] = attn1_w
             attention_weights[f'decoderlayer{i+1} attention weights 2'] = attn2_w
@@ -310,28 +309,44 @@ class Transformer(nn.Module):
         self.final_ffn = nn.Linear(d_model, target_vocab_size)    # (batch_size, seq_length, target_vocab_size)
     
     # forward
-    def forward(self, x, tar):
-        enc_out = self.encoder(x)
-        dec_out, attention_weight_history = self.decoder(tar, True, enc_out)
+    def forward(self, x, tar, input_mask, combine_mask, padding_mask):
+        enc_out = self.encoder(x, input_mask)
+        dec_out, attention_weight_history = self.decoder(tar, combine_mask, padding_mask, enc_out)
         final_output = self.final_ffn(dec_out)
         
         return final_output, attention_weight_history
     
+# Padding mask & lookahead mask
+    
+def create_padding_mask(seq):
+    padding_mask = torch.eq(seq, 0).float()
+    return padding_mask.unsqueeze(1).unsqueeze(1)
+
+def create_lookahead_mask(size):
+        lookahead_mask = torch.triu(torch.ones(size, size)) - torch.eye(size, size)
+        return lookahead_mask
 
 # Test
 heads = 2
 d_model = 4
 batch_size = 10
 dff = 8
-Seq = 100
+Seq = 50
 num_layers = 1
-inp_vocab_size = 2000
-tar_vocab_size = 1000
+inp_vocab_size = 20
+tar_vocab_size = 13
+
 tar_input = torch.randint(0, tar_vocab_size, (batch_size, Seq))
 input = torch.randint(0, inp_vocab_size, (batch_size, Seq))
+# input = torch.Tensor([[1, 1, 1, 1, 1, 1, 0, 0],[1,1,1,1,1,0,1,1]])
+
+input_mask = create_padding_mask(input)
+tar_padding_mask = create_padding_mask(tar_input[:, :-1])
+tar_lookahead_mask = create_lookahead_mask(tar_input[:, :-1].shape[1])
+combine_mask = torch.maximum(tar_padding_mask, tar_lookahead_mask)
 
 model = Transformer(input, tar_input, d_model, heads, dff, num_layers, inp_vocab_size, tar_vocab_size, 0.1)  
-out, attnw = model(input, tar_input[:, :-1])
+out, attnw = model(input, tar_input[:, :-1], input_mask, combine_mask, tar_padding_mask)
 print(f'out shape: {out.shape}')
 print(f'out: {out}')
 print(f'attnw: {attnw}')
