@@ -190,7 +190,7 @@ class Decoderlayer(nn.Module):
         attn1 = self.dropout1(attn1)
         out1 = self.layernorm1(x + attn1)
 
-        enc_out = enc_out[:, :x.shape[1], :]
+        # enc_out = enc_out[:, :x.shape[1], :]
 
         attn2, attn2_w = self.mha2(out1, out1, enc_out, enc_out, padding_mask)
         attn2 = self.dropout2(attn2)
@@ -329,9 +329,9 @@ def create_lookahead_mask(size):
 # Test
 heads = 2
 d_model = 4
-batch_size = 10
+batch_size = 2
 dff = 8
-Seq = 50
+Seq = 8
 num_layers = 1
 inp_vocab_size = 20
 tar_vocab_size = 13
@@ -344,6 +344,8 @@ input_mask = create_padding_mask(input)
 tar_padding_mask = create_padding_mask(tar_input[:, :-1])
 tar_lookahead_mask = create_lookahead_mask(tar_input[:, :-1].shape[1])
 combine_mask = torch.maximum(tar_padding_mask, tar_lookahead_mask)
+tar_padding_mask = tar_padding_mask.squeeze(1).unsqueeze(3)
+
 
 model = Transformer(input, tar_input, d_model, heads, dff, num_layers, inp_vocab_size, tar_vocab_size, 0.1)  
 out, attnw = model(input, tar_input[:, :-1], input_mask, combine_mask, tar_padding_mask)
