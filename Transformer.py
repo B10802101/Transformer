@@ -10,7 +10,10 @@ import matplotlib.pyplot as plt
 
 """
 Assume q, k, v dim(batchsize, seq_length, d_model)
-mask = True/False
+
+attention_weights 代表序列中的子詞對其他位置的子詞的注意權重。
+
+output 則是句子裡頭每個位置的子詞將 attention_weights 當作權重，從其他位置的子詞對應的資訊 v 裡頭抽取有用訊息後匯總出來的結果。
 """
 class Multihead_attention(nn.Module):
     def __init__(self, d_model, num_heads):
@@ -34,6 +37,7 @@ class Multihead_attention(nn.Module):
     q, k, v(batch_size, num_heads, seq_length, depth)
     attention_weights(batch_size, num_heads, seq_length, seq_length)
     result(batch_size, num_heads, seq_length, depth)
+    divided by d_model^0.5 in order not to cause large scale dot product
     """
 
     def Scaled_dot_product_attention(self, x, q, k, v, Mask):
@@ -45,32 +49,6 @@ class Multihead_attention(nn.Module):
         attention_weights = F.softmax(attention_scores, dim=-1)
         result = torch.matmul(attention_weights, v)
         return attention_weights, result
-
-    # Creating a lookahead Mask
-
-    """
-    For Decoder
-    0 1 1 1 1 1 1 1 1...
-    0 0 1 1 1 1 1 1 1...
-    0 0 0 1 1 1 1 1 1...
-    0 0 0 0 1 1 1 1 1...
-    0 0 0 0 0 1 1 1 1...
-    ...
-    """
-
-    def lookahead_mask(self, seq_length_q, seq_length_k):
-        lookahead_mask = torch.triu(torch.ones(seq_length_q, seq_length_k)) - torch.eye(seq_length_q, seq_length_k)
-        return lookahead_mask
-
-    # Creating a padding mask
-    
-    def create_padding_mask(self, seq):
-        padding_mask = torch.eq(seq, 0).float()
-        return padding_mask.unsqueeze(1).unsqueeze(1)
-
-    def create_lookahead_mask(self, size):
-        lookahead_mask = torch.triu(torch.ones(size, size)) - torch.eye(size, size)
-        return lookahead_mask
     
     # Split heads
 
@@ -115,6 +93,7 @@ class Multihead_attention(nn.Module):
 output dim(batch_size, seq_length, d_model)
 p.s. The same linear transform to all position of the subwords
 """
+
 class PositionwiseFeedForwardNetwork(nn.Module):
     def __init__(self, d_model, dff):
         super(PositionwiseFeedForwardNetwork, self).__init__()
@@ -131,9 +110,8 @@ class PositionwiseFeedForwardNetwork(nn.Module):
 # Encoderlayer
 
 """
-mask = True/False
 model.eval() turned dropout off
-output dim(batch_size, seq_length, d_model)
+output (batch_size, seq_length, d_model)
 """
 
 class Encoderlayer(nn.Module):
@@ -165,7 +143,7 @@ class Encoderlayer(nn.Module):
 
 """
 All sublayer's output dim(batch_size, seq_length, d_model)
-enc_out dim(batch_size, seq_length, d_model)
+enc_out (batch_size, seq_length, d_model)
 mha1(q, k, v, mask)
 mha2(q, k, v, mask)
 model.eval() turned dropout off
@@ -223,8 +201,8 @@ def Positional_encoding(batch_size, seq_length, d_model):
 # Encoder
 
 """
-Input dim (batch_size, Seq_length)
-Output dim (batch_size, Seq_length, d_model)
+Input (batch_size, Seq_length)
+Output (batch_size, Seq_length, d_model)
 Encoder consists of Encoderlayers
 Additional param: num_layers, vocab_size
 vocab_size is the amounts of vocabulary
@@ -259,8 +237,8 @@ class Encoder(nn.Module):
 # Decoder
 
 """
-Input dim (batch_size, seq_length)
-Output dimn (batch_size, seq_length, d_model)
+Input (batch_size, seq_length)
+Output (batch_size, seq_length, d_model)
 return output, attention weights history
 """
 class Decoder(nn.Module):
@@ -316,6 +294,21 @@ class Transformer(nn.Module):
         
         return final_output, attention_weight_history
     
+
+# Create all required mask
+"""
+input_padding_mask (batch_size, 1, 1, input_seq_length)
+tar_padding_mask (batch_size, 1, tar_input_seq_length, 1)
+tar_combine_mask (batch_size, 1, tar_input_seq_length, 1)
+"""
+def create_all_mask(input, tar_input, tar_input_seq_length):
+    input_padding_mask = create_padding_mask(input)
+    # tar_padding_mask = create_padding_mask(tar_input)
+    tar_padding_mask = create_padding_mask(tar_input).squeeze(1).unsqueeze(3)
+    tar_lookahead_mask = create_lookahead_mask(tar_input_seq_length)
+    tar_combine_mask = torch.maximum(tar_padding_mask, tar_lookahead_mask)
+    return input_padding_mask, tar_padding_mask, tar_combine_mask
+
 # Padding mask & lookahead mask
     
 def create_padding_mask(seq):
@@ -325,6 +318,7 @@ def create_padding_mask(seq):
 def create_lookahead_mask(size):
         lookahead_mask = torch.triu(torch.ones(size, size)) - torch.eye(size, size)
         return lookahead_mask
+
 
 # Test
 heads = 2
@@ -338,17 +332,16 @@ tar_vocab_size = 13
 
 tar_input = torch.randint(0, tar_vocab_size, (batch_size, Seq))
 input = torch.randint(0, inp_vocab_size, (batch_size, Seq))
-# input = torch.Tensor([[1, 1, 1, 1, 1, 1, 0, 0],[1,1,1,1,1,0,1,1]])
-
-input_mask = create_padding_mask(input)
-tar_padding_mask = create_padding_mask(tar_input[:, :-1])
-tar_lookahead_mask = create_lookahead_mask(tar_input[:, :-1].shape[1])
-combine_mask = torch.maximum(tar_padding_mask, tar_lookahead_mask)
-tar_padding_mask = tar_padding_mask.squeeze(1).unsqueeze(3)
-
+# test_input = torch.Tensor([[1, 1, 1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 0, 1, 1]])
+# test_tar_input = torch.Tensor([[1, 1, 1, 1, 0, 0], [1, 1, 1, 0, 1, 1]])
+input_padding_mask, tar_padding_mask, tar_combine_mask = create_all_mask(input, tar_input[:, :-1], tar_input.shape[-1]-1)
 
 model = Transformer(input, tar_input, d_model, heads, dff, num_layers, inp_vocab_size, tar_vocab_size, 0.1)  
-out, attnw = model(input, tar_input[:, :-1], input_mask, combine_mask, tar_padding_mask)
-print(f'out shape: {out.shape}')
-print(f'out: {out}')
-print(f'attnw: {attnw}')
+out, attnw = model(input, tar_input[:, :-1], input_padding_mask, tar_combine_mask, tar_padding_mask)
+# print(f'out shape: {out.shape}')
+# print(f'out: {out}')
+print(f'tar_input: {tar_input}')
+print(f'decoder combine mask shape: {tar_combine_mask.shape}')
+print(f'decoder combine mask: {tar_combine_mask}')
+print(f'attnw decoderlayer1 attention weights 1 shape: {attnw["decoderlayer1 attention weights 1"].shape}')
+print(f'attnw decoderlayer1 attention weights 1: {attnw["decoderlayer1 attention weights 1"]}')
