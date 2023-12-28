@@ -40,7 +40,7 @@ class Multihead_attention(nn.Module):
     divided by d_model^0.5 in order not to cause large scale dot product
     """
 
-    def Scaled_dot_product_attention(self, x, q, k, v, Mask):
+    def Scaled_dot_product_attention(self, q, k, v, Mask):
         d_model = k.shape[-1]
         k_t = k.permute(0, 1, 3, 2)
         attention_scores = torch.matmul(q, k_t) / (d_model ** 0.5)
@@ -79,7 +79,7 @@ class Multihead_attention(nn.Module):
         k = self.split_heads(k, self.num_heads)     # (batch_size, num_heads, seq_length, depth)
         v = self.split_heads(v, self.num_heads)     # (batch_size, num_heads, seq_length, depth)
 
-        att_w, result = self.Scaled_dot_product_attention(x, q, k, v, mask)    # result (batch_size, num_heads, seq_length, depth)
+        att_w, result = self.Scaled_dot_product_attention(q, k, v, mask)    # result (batch_size, num_heads, seq_length, depth)
         result = result.permute(0, 2, 1, 3)    # result (batch_size, seq_length, num_heads, depth)
         stack_result = result.reshape(batch_size, seq_length, -1)    # result (batch_size, seq_length, d_model)
         
@@ -130,6 +130,7 @@ class Encoderlayer(nn.Module):
 
     def forward(self, x, mask):
         attn_output, attnw = self.mha(x, x, x, x, mask)
+        print(attnw)
         attn_output = self.dropout1(attn_output)
         x = self.layernorm1(attn_output + x)
 
@@ -275,7 +276,7 @@ class Decoder(nn.Module):
 Transformer = Encoder + Decoder + Final linear layer
 forward input (x, tar)
 output (batch_size, seq_length, target_vocab_size)
-
+In cross attention, encoder's padding mask is also used
 """
 
 class Transformer(nn.Module):
@@ -287,9 +288,9 @@ class Transformer(nn.Module):
         self.final_ffn = nn.Linear(d_model, target_vocab_size)    # (batch_size, seq_length, target_vocab_size)
     
     # forward
-    def forward(self, x, tar, input_mask, combine_mask, padding_mask):
+    def forward(self, x, tar, input_mask, combine_mask):
         enc_out = self.encoder(x, input_mask)
-        dec_out, attention_weight_history = self.decoder(tar, combine_mask, padding_mask, enc_out)
+        dec_out, attention_weight_history = self.decoder(tar, combine_mask, input_mask, enc_out)
         final_output = self.final_ffn(dec_out)
         
         return final_output, attention_weight_history
@@ -304,10 +305,10 @@ tar_combine_mask (batch_size, 1, tar_input_seq_length, 1)
 def create_all_mask(input, tar_input, tar_input_seq_length):
     input_padding_mask = create_padding_mask(input)
     # tar_padding_mask = create_padding_mask(tar_input)
-    tar_padding_mask = create_padding_mask(tar_input).squeeze(1).unsqueeze(3)
+    tar_padding_mask = create_padding_mask(tar_input)
     tar_lookahead_mask = create_lookahead_mask(tar_input_seq_length)
     tar_combine_mask = torch.maximum(tar_padding_mask, tar_lookahead_mask)
-    return input_padding_mask, tar_padding_mask, tar_combine_mask
+    return input_padding_mask, tar_combine_mask
 
 # Padding mask & lookahead mask
     
@@ -332,16 +333,15 @@ tar_vocab_size = 13
 
 tar_input = torch.randint(0, tar_vocab_size, (batch_size, Seq))
 input = torch.randint(0, inp_vocab_size, (batch_size, Seq))
-# test_input = torch.Tensor([[1, 1, 1, 1, 1, 1, 0, 0], [1, 1, 1, 1, 1, 0, 1, 1]])
-# test_tar_input = torch.Tensor([[1, 1, 1, 1, 0, 0], [1, 1, 1, 0, 1, 1]])
-input_padding_mask, tar_padding_mask, tar_combine_mask = create_all_mask(input, tar_input[:, :-1], tar_input.shape[-1]-1)
+input_padding_mask, tar_combine_mask = create_all_mask(input, tar_input[:, :-1], tar_input.shape[-1]-1)
 
 model = Transformer(input, tar_input, d_model, heads, dff, num_layers, inp_vocab_size, tar_vocab_size, 0.1)  
-out, attnw = model(input, tar_input[:, :-1], input_padding_mask, tar_combine_mask, tar_padding_mask)
-# print(f'out shape: {out.shape}')
-# print(f'out: {out}')
+out, attnw = model(input, tar_input[:, :-1], input_padding_mask, tar_combine_mask)
+
 print(f'tar_input: {tar_input}')
 print(f'decoder combine mask shape: {tar_combine_mask.shape}')
 print(f'decoder combine mask: {tar_combine_mask}')
 print(f'attnw decoderlayer1 attention weights 1 shape: {attnw["decoderlayer1 attention weights 1"].shape}')
 print(f'attnw decoderlayer1 attention weights 1: {attnw["decoderlayer1 attention weights 1"]}')
+print(f'attnw decoderlayer1 attention weights 2 shape: {attnw["decoderlayer1 attention weights 2"].shape}')
+print(f'attnw decoderlayer1 attention weights 2: {attnw["decoderlayer1 attention weights 2"]}')
